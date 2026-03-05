@@ -1,76 +1,86 @@
-from typing import Optional, Type
-from pydantic import BaseModel, Field
+from typing import List, Optional, Type
+from pydantic import BaseModel, Field, PrivateAttr
 from langchain.tools import BaseTool
 from elasticsearch import Elasticsearch
 
 
 # ── Input Schema ──────────────────────────────────────────────────────────────
-
-class NutrientRange(BaseModel):
-    min: Optional[float] = Field(None, description="Minimum value (inclusive)")
-    max: Optional[float] = Field(None, description="Maximum value (inclusive)")
-
+# Flat schema — much easier for LLMs to populate reliably via function calling.
 
 class RecipeSearchInput(BaseModel):
-    """All fields are optional — combine freely to narrow results."""
+    """Search the recipe database. All fields are optional."""
 
-    # Full-text / keyword filters
-    title: Optional[str] = Field(None, description="Partial title to search for (full-text)")
-    ingredients: Optional[list[str]] = Field(
-        None, description="Ingredients that must appear in the recipe (e.g. ['chicken', 'garlic'])"
+    # --- Text filters ---
+    title: Optional[str] = Field(None, description="Partial recipe title to search for.")
+    ingredients: Optional[List[str]] = Field(
+        None,
+        description="Ingredients that MUST appear in the recipe, e.g. ['chicken', 'garlic'].",
     )
 
-    # Numeric / range filters (per-serving values stored in the DB)
-    calories: Optional[NutrientRange] = Field(None, description="Calorie range, e.g. {'min': 100, 'max': 400}")
-    protein: Optional[NutrientRange] = Field(None, description="Protein (g) range")
-    fat: Optional[NutrientRange] = Field(None, description="Total fat (g) range")
-    saturated_fat: Optional[NutrientRange] = Field(None, description="Saturated fat (g) range")
-    carbohydrates: Optional[NutrientRange] = Field(None, description="Carbohydrate (g) range")
-    fiber: Optional[NutrientRange] = Field(None, description="Fiber (g) range")
-    sugar: Optional[NutrientRange] = Field(None, description="Sugar (g) range")
-    sodium: Optional[NutrientRange] = Field(
-        None, description="Sodium (g) range — note: stored in grams in this DB"
-    )
+    # --- Calorie range ---
+    min_calories: Optional[float] = Field(None, description="Minimum calories per serving.")
+    max_calories: Optional[float] = Field(None, description="Maximum calories per serving.")
 
-    # Result control
-    max_results: int = Field(10, description="Maximum number of recipes to return (default 10)")
+    # --- Protein ---
+    min_protein: Optional[float] = Field(None, description="Minimum protein in grams per serving.")
+    max_protein: Optional[float] = Field(None, description="Maximum protein in grams per serving.")
+
+    # --- Fat ---
+    min_fat: Optional[float] = Field(None, description="Minimum total fat in grams per serving.")
+    max_fat: Optional[float] = Field(None, description="Maximum total fat in grams per serving.")
+
+    # --- Saturated fat ---
+    min_saturated_fat: Optional[float] = Field(None, description="Minimum saturated fat in grams.")
+    max_saturated_fat: Optional[float] = Field(None, description="Maximum saturated fat in grams.")
+
+    # --- Carbohydrates ---
+    min_carbs: Optional[float] = Field(None, description="Minimum carbohydrates in grams per serving.")
+    max_carbs: Optional[float] = Field(None, description="Maximum carbohydrates in grams per serving.")
+
+    # --- Fiber ---
+    min_fiber: Optional[float] = Field(None, description="Minimum dietary fiber in grams per serving.")
+    max_fiber: Optional[float] = Field(None, description="Maximum dietary fiber in grams per serving.")
+
+    # --- Sugar ---
+    min_sugar: Optional[float] = Field(None, description="Minimum sugar in grams per serving.")
+    max_sugar: Optional[float] = Field(None, description="Maximum sugar in grams per serving.")
+
+    # --- Sodium (stored as grams in this DB) ---
+    min_sodium: Optional[float] = Field(None, description="Minimum sodium in grams per serving.")
+    max_sodium: Optional[float] = Field(None, description="Maximum sodium in grams per serving.")
+
+    # --- Result control ---
+    max_results: int = Field(10, description="Maximum number of results to return.")
 
 
 # ── Elasticsearch query builder ───────────────────────────────────────────────
 
-# Maps schema field names → Elasticsearch document field paths
-NUTRIENT_FIELD_MAP = {
-    "calories":      "nutrition.calories",
-    "protein":       "nutrition.proteinContent",
-    "fat":           "nutrition.fatContent",
-    "saturated_fat": "nutrition.saturatedFatContent",
-    "carbohydrates": "nutrition.carbohydrateContent",
-    "fiber":         "nutrition.fiberContent",
-    "sugar":         "nutrition.sugarContent",
-    "sodium":        "nutrition.sodiumContent",
+# Maps (min_field, max_field) in the schema → ES document path
+NUTRIENT_RANGE_MAP = {
+    ("min_calories",      "max_calories"):      "nutrition.calories",
+    ("min_protein",       "max_protein"):       "nutrition.proteinContent",
+    ("min_fat",           "max_fat"):           "nutrition.fatContent",
+    ("min_saturated_fat", "max_saturated_fat"): "nutrition.saturatedFatContent",
+    ("min_carbs",         "max_carbs"):         "nutrition.carbohydrateContent",
+    ("min_fiber",         "max_fiber"):         "nutrition.fiberContent",
+    ("min_sugar",         "max_sugar"):         "nutrition.sugarContent",
+    ("min_sodium",        "max_sodium"):        "nutrition.sodiumContent",
 }
 
 
-def build_recipe_query(params: RecipeSearchInput) -> dict:
-    """Convert a RecipeSearchInput into an Elasticsearch bool query."""
+def build_recipe_query(p: RecipeSearchInput) -> dict:
     must_clauses = []
     filter_clauses = []
 
-    # ── Full-text: title ──────────────────────────────────────────────────────
-    if params.title:
+    # Full-text: title
+    if p.title:
         must_clauses.append({
-            "match": {
-                "title": {
-                    "query": params.title,
-                    "fuzziness": "AUTO",   # tolerates minor typos
-                }
-            }
+            "match": {"title": {"query": p.title, "fuzziness": "AUTO"}}
         })
 
-    # ── Full-text: ingredients ────────────────────────────────────────────────
-    # Each requested ingredient must appear at least once in the ingredients list.
-    if params.ingredients:
-        for ingredient in params.ingredients:
+    # Full-text: every requested ingredient must be present
+    if p.ingredients:
+        for ingredient in p.ingredients:
             must_clauses.append({
                 "match": {
                     "ingredients": {
@@ -81,61 +91,55 @@ def build_recipe_query(params: RecipeSearchInput) -> dict:
                 }
             })
 
-    # ── Numeric ranges: nutrients ─────────────────────────────────────────────
-    for field_name, es_path in NUTRIENT_FIELD_MAP.items():
-        range_val: Optional[NutrientRange] = getattr(params, field_name)
-        if range_val is None:
-            continue
+    # Numeric range filters
+    for (min_field, max_field), es_path in NUTRIENT_RANGE_MAP.items():
+        min_val = getattr(p, min_field)
+        max_val = getattr(p, max_field)
 
-        range_clause: dict = {}
-        if range_val.min is not None:
-            range_clause["gte"] = range_val.min
-        if range_val.max is not None:
-            range_clause["lte"] = range_val.max
-
+        range_clause = {}
+        if min_val is not None:
+            range_clause["gte"] = min_val
+        if max_val is not None:
+            range_clause["lte"] = max_val
         if range_clause:
             filter_clauses.append({"range": {es_path: range_clause}})
 
-    # ── Assemble bool query ───────────────────────────────────────────────────
     bool_query: dict = {}
     if must_clauses:
         bool_query["must"] = must_clauses
     if filter_clauses:
         bool_query["filter"] = filter_clauses
 
-    # If nothing was specified, return all documents
     if not bool_query:
-        return {"query": {"match_all": {}}, "size": params.max_results}
+        return {"query": {"match_all": {}}, "size": p.max_results}
 
-    return {"query": {"bool": bool_query}, "size": params.max_results}
+    return {"query": {"bool": bool_query}, "size": p.max_results}
 
 
 # ── LangChain Tool ────────────────────────────────────────────────────────────
 
 class RecipeSearchTool(BaseTool):
-    """LangChain tool that searches an Elasticsearch recipe database."""
-
     name: str = "recipe_search"
     description: str = (
-        "Search a recipe database by title, ingredients, and/or nutritional ranges "
-        "(calories, protein, fat, carbohydrates, fiber, sugar, sodium, saturated fat). "
-        "All parameters are optional — combine them to narrow results."
+        "Search a recipe database by title, required ingredients, and/or nutritional "
+        "ranges (calories, protein, fat, saturated fat, carbohydrates, fiber, sugar, sodium). "
+        "All parameters are optional — combine them freely to narrow results."
     )
     args_schema: Type[BaseModel] = RecipeSearchInput
 
-    # Injected at construction time
-    es_client: Elasticsearch
-    index_name: str = "recipes"
+    # PrivateAttr keeps the ES client out of Pydantic's field system entirely,
+    # avoiding serialization errors and Pydantic validation issues.
+    _es: Elasticsearch = PrivateAttr()
+    _index: str = PrivateAttr()
 
-    class Config:
-        arbitrary_types_allowed = True  # allows Elasticsearch client as a field
-
-    # ── Internal helpers ──────────────────────────────────────────────────────
+    def __init__(self, es_client: Elasticsearch, index_name: str = "recipes", **kwargs):
+        super().__init__(**kwargs)
+        self._es = es_client
+        self._index = index_name
 
     def _format_hit(self, hit: dict) -> dict:
-        """Return a clean summary dict from an ES hit."""
         src = hit.get("_source", {})
-        nutrition = src.get("nutrition", {})
+        n = src.get("nutrition", {})
         return {
             "title":       src.get("title"),
             "servings":    src.get("servings"),
@@ -144,63 +148,79 @@ class RecipeSearchTool(BaseTool):
             "ingredients": src.get("ingredients", []),
             "steps":       src.get("steps", []),
             "nutrition": {
-                "calories":      nutrition.get("calories"),
-                "protein_g":     nutrition.get("proteinContent"),
-                "fat_g":         nutrition.get("fatContent"),
-                "saturated_fat_g": nutrition.get("saturatedFatContent"),
-                "carbs_g":       nutrition.get("carbohydrateContent"),
-                "fiber_g":       nutrition.get("fiberContent"),
-                "sugar_g":       nutrition.get("sugarContent"),
-                "sodium_g":      nutrition.get("sodiumContent"),
+                "calories":        n.get("calories"),
+                "protein_g":       n.get("proteinContent"),
+                "fat_g":           n.get("fatContent"),
+                "saturated_fat_g": n.get("saturatedFatContent"),
+                "carbs_g":         n.get("carbohydrateContent"),
+                "fiber_g":         n.get("fiberContent"),
+                "sugar_g":         n.get("sugarContent"),
+                "sodium_g":        n.get("sodiumContent"),
             },
             "score": hit.get("_score"),
         }
 
-    # ── Tool entry points ─────────────────────────────────────────────────────
-
-    def _run(self, **kwargs) -> list[dict]:
-        params = RecipeSearchInput(**kwargs)
+    # Explicit kwargs mirror RecipeSearchInput exactly so LangChain routes them correctly
+    def _run(
+        self,
+        title: Optional[str] = None,
+        ingredients: Optional[List[str]] = None,
+        min_calories: Optional[float] = None,
+        max_calories: Optional[float] = None,
+        min_protein: Optional[float] = None,
+        max_protein: Optional[float] = None,
+        min_fat: Optional[float] = None,
+        max_fat: Optional[float] = None,
+        min_saturated_fat: Optional[float] = None,
+        max_saturated_fat: Optional[float] = None,
+        min_carbs: Optional[float] = None,
+        max_carbs: Optional[float] = None,
+        min_fiber: Optional[float] = None,
+        max_fiber: Optional[float] = None,
+        min_sugar: Optional[float] = None,
+        max_sugar: Optional[float] = None,
+        min_sodium: Optional[float] = None,
+        max_sodium: Optional[float] = None,
+        max_results: int = 10,
+    ) -> List[dict]:
+        params = RecipeSearchInput(
+            title=title,
+            ingredients=ingredients,
+            min_calories=min_calories, max_calories=max_calories,
+            min_protein=min_protein,   max_protein=max_protein,
+            min_fat=min_fat,           max_fat=max_fat,
+            min_saturated_fat=min_saturated_fat, max_saturated_fat=max_saturated_fat,
+            min_carbs=min_carbs,       max_carbs=max_carbs,
+            min_fiber=min_fiber,       max_fiber=max_fiber,
+            min_sugar=min_sugar,       max_sugar=max_sugar,
+            min_sodium=min_sodium,     max_sodium=max_sodium,
+            max_results=max_results,
+        )
         query = build_recipe_query(params)
-        response = self.es_client.search(index=self.index_name, body=query)
+        response = self._es.search(index=self._index, body=query)
         hits = response.get("hits", {}).get("hits", [])
         return [self._format_hit(h) for h in hits]
 
-    async def _arun(self, **kwargs) -> list[dict]:
-        # Wire up an async ES client here if needed; falls back to sync for now.
+    async def _arun(self, **kwargs) -> List[dict]:
+        # For true async, swap in AsyncElasticsearch and await the search call
         return self._run(**kwargs)
 
 
-# ── Usage example ─────────────────────────────────────────────────────────────
+# ── Wire up to an agent ───────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    es = Elasticsearch("http://localhost:9200")
+    from langchain.agents import AgentType, initialize_agent
+    from langchain_openai import ChatOpenAI
 
+    es = Elasticsearch("http://localhost:9200")
     tool = RecipeSearchTool(es_client=es, index_name="recipes")
 
-    # Example 1 — low-calorie turkey recipes
-    results = tool._run(
-        title="turkey",
-        calories={"min": 50, "max": 300},
-        protein={"min": 15},
-        max_results=5,
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    agent = initialize_agent(
+        tools=[tool],
+        llm=llm,
+        agent=AgentType.OPENAI_FUNCTIONS,  # structured function calling
+        verbose=True,
     )
-    for r in results:
-        print(r["title"], "|", r["nutrition"])
 
-    # Example 2 — recipes containing chicken and garlic, under 500 calories
-    results = tool._run(
-        ingredients=["chicken", "garlic"],
-        calories={"max": 500},
-        max_results=10,
-    )
-    for r in results:
-        print(r["title"])
-
-    # Example 3 — high-fiber, low-sugar soups
-    results = tool._run(
-        title="soup",
-        fiber={"min": 4},
-        sugar={"max": 3},
-    )
-    for r in results:
-        print(r["title"], "| fiber:", r["nutrition"]["fiber_g"])
+    agent.run("Find turkey soup recipes under 300 calories with at least 15g of protein.")
