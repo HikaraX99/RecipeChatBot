@@ -205,3 +205,5 @@ class RecipeSearchTool(BaseTool):
         # For true async, swap in AsyncElasticsearch and await the search call
         return self._run(**kwargs)
 
+es = Elasticsearch("http://localhost:9200")
+search_recipes = RecipeSearchTool(es)
