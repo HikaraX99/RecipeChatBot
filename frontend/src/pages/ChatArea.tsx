@@ -51,28 +51,43 @@ const ChatArea = () => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, isTyping]);
 
+  // send prompt to store function
   const assistantReply = async (newPrompt: Prompt) => {
     setIsTyping(true);
 
-    const chatRes = await createChat(newPrompt);
-    let replay: string = "";
+    try {
+      const chatRes = await createChat(newPrompt);
 
-    if (chatRes.ok) {
-      const payload: ChatResponse = await chatRes.json();
-      replay = payload.answer;
-    } else {
-      replay = "ERROR: Internal Server Error";
+      let replyText = "";
+
+      if (chatRes.ok) {
+        const payload: ChatResponse = await chatRes.json();
+        replyText = payload.answer;
+      } else {
+        replyText = "ERROR: Internal Server Error";
+      }
+
+      const reply: Msg = {
+        id: uid(),
+        role: "assistant",
+        content: replyText,
+        createdAt: Date.now(),
+      };
+
+      setMessages((prev) => [...prev, reply]);
+    } catch (err) {
+      const reply: Msg = {
+        id: uid(),
+        role: "assistant",
+        content: "ERROR: Request failed",
+        createdAt: Date.now(),
+      };
+      console.log((err as Error).message);
+
+      setMessages((prev) => [...prev, reply]);
+    } finally {
+      setIsTyping(false);
     }
-
-    const reply: Msg = {
-      id: uid(),
-      role: "assistant",
-      content: replay,
-      createdAt: Date.now(),
-    };
-
-    setMessages((prev) => [...prev, reply]);
-    setIsTyping(false);
   };
 
   // form initial state
@@ -102,7 +117,7 @@ const ChatArea = () => {
       setMessages((prev) => [...prev, userMsg]);
 
       // send prompt to the agent
-      await assistantReply(newPrompt);
+      assistantReply(newPrompt);
 
       // clean the user input
       setInput("");
@@ -219,7 +234,7 @@ function MessageRow({ msg }: { msg: Msg }) {
   );
 }
 
-function TypingRow() {
+const TypingRow = () => {
   return (
     <div className="flex justify-start">
       <div className="flex max-w-[90%] items-end gap-3">
@@ -240,14 +255,14 @@ function TypingRow() {
       </div>
     </div>
   );
-}
+};
 
-function Dot({ className = "" }: { className?: string }) {
+const Dot = ({ className = "" }: { className?: string }) => {
   return (
     <span
       className={`h-2 w-2 animate-bounce rounded-full bg-foreground/40 ${className}`}
     />
   );
-}
+};
 
 export default ChatArea;
