@@ -6,10 +6,8 @@ from langchain_ollama import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 from search import search_recipes
 
-# ── LLM (plain, no tool binding) ─────────────────────────────────────────────
 llm = OllamaLLM(model="llama3.1", temperature=0)
 
-# ── Prompt 1: extract search params from user message ────────────────────────
 EXTRACT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Extract recipe search parameters from the user message and return ONLY a JSON object.
 
@@ -36,7 +34,6 @@ Return ONLY the JSON object. No explanation. No markdown. No extra text."""),
     ("human", "{user_input}"),
 ])
 
-# ── Prompt 2: summarise ES results ───────────────────────────────────────────
 SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a helpful cooking assistant.
 Summarise the recipes below. For each one show:
@@ -53,7 +50,6 @@ summary_chain = SUMMARY_PROMPT | llm
 
 
 def parse_params(user_input: str) -> dict:
-    """Call LLM to extract search params, return as dict."""
     raw = extract_chain.invoke({"user_input": user_input})
     clean = re.sub(r"```(?:json)?|```", "", raw).strip()
     match = re.search(r"\{.*\}", clean, re.DOTALL)
@@ -63,7 +59,6 @@ def parse_params(user_input: str) -> dict:
 
 
 def search(params: dict) -> List[dict]:
-    """Run ES search with extracted params."""
     results = search_recipes.invoke({k: v for k, v in params.items() if v is not None})
     if not results:
         return []
@@ -77,7 +72,6 @@ def search(params: dict) -> List[dict]:
 
 
 def summarise(recipes: List[dict]) -> str:
-    """Call LLM to produce a friendly summary of the recipe list."""
     slim = [
         {
             "title": r.get("title"),
@@ -96,6 +90,7 @@ def run_agent(user_input: str) -> str:
     except (json.JSONDecodeError, ValueError) as e:
         return f"Sorry, I couldn't understand that request. ({e})"
 
+    '''
     print("\n--- RECIPE SEARCH TRIGGERED ---")
     print(f"  Title          : {params.get('title')}")
     print(f"  Cal range      : {params.get('min_calories')} - {params.get('max_calories')} kcal")
@@ -105,6 +100,7 @@ def run_agent(user_input: str) -> str:
     print(f"  Fiber range    : {params.get('min_fiber')} - {params.get('max_fiber')} g")
     print(f"  Ingredients    : {params.get('ingredients')}")
     print(f"  Max results    : {params.get('max_results', 3)}")
+    '''
 
     recipes = search(params)
     if not recipes:
