@@ -13,7 +13,7 @@ def get_session_history(session_id: str):
 class RecipeAssistant:
     def __init__(self, raw_recipe_text):
         # Use the updated class name
-        self.llm = OllamaLLM(model="llama3") 
+        self.llm = OllamaLLM(model="llama3.1") 
         self.recipe_text = raw_recipe_text
         
         self.prompt = ChatPromptTemplate.from_messages([

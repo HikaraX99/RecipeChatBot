@@ -10,7 +10,8 @@ const HomePage = () => {
   const navigate = useNavigate();
 
   // import the store function
-  const { setInitialPrompt } = useRecipeStore();
+  const { setInitialPrompt } =
+    useRecipeStore();
 
   // form initial state
   const initialState: ActionState = { error: null };
@@ -30,11 +31,8 @@ const HomePage = () => {
       // set the initial prompt state
       setInitialPrompt(initialPrompt);
 
-      //TODO: placeholder, handle the prompt by using store (API).
-      console.log(initialPrompt);
-
       // go to chat page and pass the initial message
-      navigate("/chat", { state: { initialPrompt } });
+      navigate("/chat");
 
       // clear local input
       setInput("");

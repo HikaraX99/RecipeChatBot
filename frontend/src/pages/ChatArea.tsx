@@ -3,7 +3,13 @@ import ChatInput from "@/components/ChatInput";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
-import type { ActionState, Prompt, ChatResponse } from "@/types/type";
+import type {
+  ActionState,
+  Prompt,
+  SearchResponse,
+  ChatPrompt,
+  ChatResponse,
+} from "@/types/type";
 import { toast } from "sonner";
 import { useRecipeStore } from "@/store/useRecipeStore";
 
@@ -26,6 +32,7 @@ function formatTime(ts: number) {
 }
 
 const ChatArea = () => {
+  // set initial message object
   const [messages, setMessages] = React.useState<Msg[]>(() => [
     {
       id: uid(),
@@ -39,56 +46,122 @@ const ChatArea = () => {
   const initialPrompt = useRecipeStore((s) => s.initialPrompt);
   const clearInitialPrompt = useRecipeStore((s) => s.clearInitialPrompt);
 
-  // Get the functions in RecipeStore
-  const { createChat } = useRecipeStore();
+  // Get the functions from RecipeStore
+  const {
+    createChatSession,
+    fetchChat,
+    setSessionId,
+    setPrompt,
+    setRecipeText,
+  } = useRecipeStore();
 
   const [input, setInput] = React.useState("");
-  const [isTyping, setIsTyping] = React.useState(false);
+  const [isThinking, setIsThinking] = React.useState(false);
 
   const bottomRef = React.useRef<HTMLDivElement | null>(null);
 
   React.useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages.length, isTyping]);
+  }, [messages.length, isThinking]);
 
-  // send prompt to store function
-  const assistantReply = async (newPrompt: Prompt) => {
-    setIsTyping(true);
+  // handle the prompt send and agent reply
+  const assistantReply = React.useCallback(
+    async (newPrompt: Prompt) => {
+      setIsThinking(true);
 
-    try {
-      const chatRes = await createChat(newPrompt);
+      // Recipe search response object
+      let searchRes: SearchResponse = {
+        summary: "",
+        session_id: "",
+      };
+
+      let chatRes: ChatResponse = {
+        answer: "",
+      };
 
       let replyText = "";
 
-      if (chatRes.ok) {
-        const payload: ChatResponse = await chatRes.json();
-        replyText = payload.answer;
-      } else {
-        replyText = "ERROR: Internal Server Error";
+      try {
+        const currentSessionId = useRecipeStore.getState().sessionId;
+        if (!currentSessionId) {
+          // response from the recipe search
+          const sessionRes = await createChatSession(newPrompt);
+
+          if (sessionRes.ok) {
+            searchRes = await sessionRes.json();
+            replyText = searchRes.summary;
+            setSessionId(searchRes.session_id);
+            setRecipeText(searchRes.summary);
+          } else {
+            replyText = "ERROR: Please check your payload.";
+          }
+        } else {
+          const currentRecipe = useRecipeStore.getState().recipeText;
+          // set the chant prompt
+          const chatPrompt: ChatPrompt = {
+            chatSessionId: currentSessionId,
+            message: newPrompt.promptText,
+            recipeText: currentRecipe,
+          };
+
+          // wait for the LLM
+          const chatBotRes = await fetchChat(chatPrompt);
+          if (chatBotRes.ok) {
+            chatRes = await chatBotRes.json();
+            replyText = chatRes.answer;
+          } else {
+            replyText = `ERROR: Please check your session ID and payload.`;
+          }
+        }
+        const reply: Msg = {
+          id: uid(),
+          role: "assistant",
+          content: replyText,
+          createdAt: Date.now(),
+        };
+
+        setMessages((prev) => [...prev, reply]);
+      } catch (err) {
+        const reply: Msg = {
+          id: uid(),
+          role: "assistant",
+          content: `ERROR: Request failed; ${(err as Error).message}`,
+          createdAt: Date.now(),
+        };
+
+        setMessages((prev) => [...prev, reply]);
+      } finally {
+        setIsThinking(false);
       }
+    },
+    [createChatSession, fetchChat, setRecipeText, setSessionId],
+  );
 
-      const reply: Msg = {
+  // function handle the prompt send
+  const sendPrompt = React.useCallback(
+    async (text: string) => {
+      // crate a new prompt object
+      const newPrompt: Prompt = { promptText: text };
+
+      setPrompt(newPrompt);
+
+      const userMsg: Msg = {
         id: uid(),
-        role: "assistant",
-        content: replyText,
+        role: "user",
+        content: text,
         createdAt: Date.now(),
       };
 
-      setMessages((prev) => [...prev, reply]);
-    } catch (err) {
-      const reply: Msg = {
-        id: uid(),
-        role: "assistant",
-        content: "ERROR: Request failed",
-        createdAt: Date.now(),
-      };
-      console.log((err as Error).message);
+      setMessages((prev) => [...prev, userMsg]);
 
-      setMessages((prev) => [...prev, reply]);
-    } finally {
-      setIsTyping(false);
-    }
-  };
+      // send prompt object to the agent
+      assistantReply(newPrompt);
+
+      // clean the user input
+      setInput("");
+    },
+    [assistantReply, setPrompt],
+  );
 
   // form initial state
   const initialState: ActionState = { error: null };
@@ -100,27 +173,12 @@ const ChatArea = () => {
   ): Promise<ActionState> => {
     try {
       const text = String(payload.get("promptText")).trim();
-      // crate a new prompt object
-      const newPrompt: Prompt = {
-        promptText: text,
-      };
 
-      if (!text || isTyping) return { error: "Please enter a message." };
+      if (!text) return { error: "Please enter a message." };
+      if (isThinking) return { error: "Please wait for the current response." };
 
-      const userMsg: Msg = {
-        id: uid(),
-        role: "user",
-        content: text,
-        createdAt: Date.now(),
-      };
-
-      setMessages((prev) => [...prev, userMsg]);
-
-      // send prompt to the agent
-      assistantReply(newPrompt);
-
-      // clean the user input
-      setInput("");
+      // handle the prompt
+      await sendPrompt(text);
 
       return { error: null };
     } catch (err) {
@@ -130,6 +188,7 @@ const ChatArea = () => {
   };
 
   // user input form action
+  const hasAutoSentRef = React.useRef(false);
   const [state, formAction, isPending] = React.useActionState<
     ActionState,
     FormData
@@ -137,20 +196,13 @@ const ChatArea = () => {
 
   // handle the initial prompt
   React.useEffect(() => {
+    if (hasAutoSentRef.current) return;
     if (!initialPrompt?.promptText) return;
 
-    const text = initialPrompt.promptText;
-    // 1) set input
-    setInput(text);
-
-    // 2) send it to form
-    const fd = new FormData();
-    fd.set("promptText", text);
-    formAction(fd);
-
+    hasAutoSentRef.current = true;
+    sendPrompt(initialPrompt.promptText);
     clearInitialPrompt();
-    window.history.replaceState({}, "");
-  }, [formAction, initialPrompt, clearInitialPrompt]);
+  }, [initialPrompt, clearInitialPrompt, sendPrompt]);
 
   // error toaster
   React.useEffect(() => {
@@ -169,7 +221,7 @@ const ChatArea = () => {
                 <MessageRow key={m.id} msg={m} />
               ))}
 
-              {isTyping && <TypingRow />}
+              {isThinking && <ThinkingRow />}
 
               <div ref={bottomRef} />
             </div>
@@ -194,6 +246,7 @@ const ChatArea = () => {
   );
 };
 
+// message column
 function MessageRow({ msg }: { msg: Msg }) {
   const isUser = msg.role === "user";
 
@@ -234,7 +287,7 @@ function MessageRow({ msg }: { msg: Msg }) {
   );
 }
 
-const TypingRow = () => {
+const ThinkingRow = () => {
   return (
     <div className="flex justify-start">
       <div className="flex max-w-[90%] items-end gap-3">
@@ -249,7 +302,7 @@ const TypingRow = () => {
               <Dot className="animation-delay-150" />
               <Dot className="animation-delay-300" />
             </span>
-            <span>Typing…</span>
+            <span>Thinking…</span>
           </div>
         </div>
       </div>
