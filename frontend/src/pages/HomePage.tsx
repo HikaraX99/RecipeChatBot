@@ -10,8 +10,7 @@ const HomePage = () => {
   const navigate = useNavigate();
 
   // import the store function
-  const { setInitialPrompt } =
-    useRecipeStore();
+  const { setInitialPrompt } = useRecipeStore();
 
   // form initial state
   const initialState: ActionState = { error: null };
@@ -59,7 +58,7 @@ const HomePage = () => {
     <div className="min-h-[calc(80vh-64px)] flex items-center justify-center px-4">
       <div className="w-full max-w-5xl flex flex-col items-center gap-10">
         <h1 className="text-center text-4xl font-normal">
-          What are you working on?
+          What kind of recipe are you looking for?
         </h1>
         <div className="w-full">
           <ChatInput
