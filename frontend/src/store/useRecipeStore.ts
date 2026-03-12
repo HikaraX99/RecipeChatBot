@@ -54,7 +54,7 @@ export const useRecipeStore = create<RecipeStore>((set) => ({
     return res;
   },
 
-  // POST: handle the following conversation and get chat response payload
+  // POST: handle the following conversation and get response payload
   fetchChat: async (chatPrompt: ChatPrompt) => {
     const res = await fetch("/api/chat", {
       method: "POST",
