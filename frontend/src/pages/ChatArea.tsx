@@ -12,6 +12,14 @@ import type {
 } from "@/types/type";
 import { toast } from "sonner";
 import { useRecipeStore } from "@/store/useRecipeStore";
+import { RefreshCw } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Button } from "@/components/ui/button";
 
 type Role = "user" | "assistant";
 
@@ -21,6 +29,17 @@ type Msg = {
   content: string;
   createdAt: number;
 };
+
+const STARTER_MESSAGE = "What kind of recipe are you looking for?";
+
+function createStarterMessage(): Msg {
+  return {
+    id: uid(),
+    role: "assistant",
+    content: STARTER_MESSAGE,
+    createdAt: Date.now(),
+  };
+}
 
 function uid() {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
@@ -33,14 +52,7 @@ function formatTime(ts: number) {
 
 const ChatArea = () => {
   // set initial message object
-  const [messages, setMessages] = React.useState<Msg[]>(() => [
-    {
-      id: uid(),
-      role: "assistant",
-      content: "Hi! Ask me anything",
-      createdAt: Date.now(),
-    },
-  ]);
+  const [messages, setMessages] = React.useState<Msg[]>(() => [createStarterMessage()]);
 
   // get the initial prompt
   const initialPrompt = useRecipeStore((s) => s.initialPrompt);
@@ -83,6 +95,7 @@ const ChatArea = () => {
 
       try {
         const currentSessionId = useRecipeStore.getState().sessionId;
+        // if currentSessionId does not exist
         if (!currentSessionId) {
           // response from the recipe search
           const sessionRes = await createChatSession(newPrompt);
@@ -134,8 +147,25 @@ const ChatArea = () => {
         setIsThinking(false);
       }
     },
-    [createChatSession, fetchChat, setRecipeText, setSessionId],
+    [
+      createChatSession,
+      fetchChat,
+      setRecipeText,
+      setSessionId,
+    ],
   );
+
+  const refreshRecipeSearch = React.useCallback(() => {
+    if (isThinking) return;
+
+    const { setPrompt, setSessionId, setRecipeText } = useRecipeStore.getState();
+
+    setPrompt({ promptText: "" });
+    setSessionId("");
+    setRecipeText("");
+    setInput("");
+    setMessages([createStarterMessage()]);
+  }, [isThinking]);
 
   // function handle the prompt send
   const sendPrompt = React.useCallback(
@@ -218,7 +248,12 @@ const ChatArea = () => {
           <div className="px-4 pt-4 sm:px-6">
             <div className="mx-auto max-w-4xl flex flex-col gap-5">
               {messages.map((m) => (
-                <MessageRow key={m.id} msg={m} />
+                <MessageRow
+                  key={m.id}
+                  msg={m}
+                  onRefresh={m.role === "assistant" ? refreshRecipeSearch : undefined}
+                  isRefreshing={isThinking}
+                />
               ))}
 
               {isThinking && <ThinkingRow />}
@@ -247,7 +282,15 @@ const ChatArea = () => {
 };
 
 // message column
-function MessageRow({ msg }: { msg: Msg }) {
+function MessageRow({
+  msg,
+  onRefresh,
+  isRefreshing,
+}: {
+  msg: Msg;
+  onRefresh?: () => void;
+  isRefreshing: boolean;
+}) {
   const isUser = msg.role === "user";
 
   return (
@@ -273,12 +316,34 @@ function MessageRow({ msg }: { msg: Msg }) {
             </div>
           </div>
         ) : (
-          <div className="px-1">
-            <div className="whitespace-pre-wrap text-base leading-relaxed text-foreground">
-              {msg.content}
+          <div>
+            <div className="rounded-2xl bg-gray-100 px-4 py-3 text-base leading-relaxed text-primary-foreground shadow-sm">
+              <div className="whitespace-pre-wrap text-base leading-relaxed text-foreground">
+                {msg.content}
+              </div>
+              <div className="mt-2 text-[11px] text-muted-foreground">
+                {formatTime(msg.createdAt)}
+              </div>
             </div>
-            <div className="mt-2 text-[11px] text-muted-foreground">
-              {formatTime(msg.createdAt)}
+            <div className="pt-1">
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 cursor-pointer rounded-sm bg-transparent p-0 hover:bg-gray-100"
+                      onClick={onRefresh}
+                      disabled={!onRefresh || isRefreshing}
+                    >
+                      <RefreshCw className="size-4.5 text-gray-600" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    <p>Try different recipes</p>
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
             </div>
           </div>
         )}
