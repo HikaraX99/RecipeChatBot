@@ -16,6 +16,16 @@ class RecipeSearchInput(BaseModel):
         description="Ingredients that MUST appear in the recipe, e.g. ['chicken', 'garlic'].",
     )
 
+    # --- Exclusions ---
+    excluded_ingredients: Optional[List[str]] = Field(
+        None,
+        description="Ingredients that must NOT appear in the recipe, e.g. ['carrots', 'potatoes'].",
+    )
+    excluded_title_keywords: Optional[List[str]] = Field(
+        None,
+        description="Words that must NOT appear in the recipe title, e.g. ['soup', 'fried'].",
+    )
+
     # --- Calorie range ---
     min_calories: Optional[float] = Field(None, description="Minimum calories per serving.")
     max_calories: Optional[float] = Field(None, description="Maximum calories per serving.")
@@ -69,6 +79,7 @@ NUTRIENT_RANGE_MAP = {
 def build_recipe_query(p: RecipeSearchInput) -> dict:
     must_clauses = []
     filter_clauses = []
+    must_not_clauses = []
 
     # Full-text: title
     if p.title:
@@ -102,11 +113,33 @@ def build_recipe_query(p: RecipeSearchInput) -> dict:
         if range_clause:
             filter_clauses.append({"range": {es_path: range_clause}})
 
+    # Excluded ingredients — block any recipe containing these
+    if p.excluded_ingredients:
+        for ingredient in p.excluded_ingredients:
+            must_not_clauses.append({
+                "match": {
+                    "ingredients": {
+                        "query": ingredient,
+                        "fuzziness": "AUTO",
+                        "operator": "and",
+                    }
+                }
+            })
+
+    # Excluded title keywords — block recipes whose title contains these words
+    if p.excluded_title_keywords:
+        for keyword in p.excluded_title_keywords:
+            must_not_clauses.append({
+                "match": {"title": {"query": keyword, "fuzziness": "AUTO"}}
+            })
+
     bool_query: dict = {}
     if must_clauses:
         bool_query["must"] = must_clauses
     if filter_clauses:
         bool_query["filter"] = filter_clauses
+    if must_not_clauses:
+        bool_query["must_not"] = must_not_clauses
 
     if not bool_query:
         return {"query": {"match_all": {}}, "size": p.max_results}
@@ -119,14 +152,12 @@ def build_recipe_query(p: RecipeSearchInput) -> dict:
 class RecipeSearchTool(BaseTool):
     name: str = "recipe_search"
     description: str = (
-        "Search a recipe database by title, required ingredients, and/or nutritional "
-        "ranges (calories, protein, fat, saturated fat, carbohydrates, fiber, sugar, sodium). "
-        "All parameters are optional — combine them freely to narrow results."
+        "Search a recipe database by title, required ingredients, excluded ingredients, "
+        "and/or nutritional ranges (calories, protein, fat, saturated fat, carbohydrates, "
+        "fiber, sugar, sodium). All parameters are optional — combine them freely to narrow results."
     )
     args_schema: Type[BaseModel] = RecipeSearchInput
 
-    # PrivateAttr keeps the ES client out of Pydantic's field system entirely,
-    # avoiding serialization errors and Pydantic validation issues.
     _es: Elasticsearch = PrivateAttr()
     _index: str = PrivateAttr()
 
@@ -159,11 +190,12 @@ class RecipeSearchTool(BaseTool):
             "score": hit.get("_score"),
         }
 
-    # Explicit kwargs mirror RecipeSearchInput exactly so LangChain routes them correctly
     def _run(
         self,
         title: Optional[str] = None,
         ingredients: Optional[List[str]] = None,
+        excluded_ingredients: Optional[List[str]] = None,
+        excluded_title_keywords: Optional[List[str]] = None,
         min_calories: Optional[float] = None,
         max_calories: Optional[float] = None,
         min_protein: Optional[float] = None,
@@ -185,6 +217,8 @@ class RecipeSearchTool(BaseTool):
         params = RecipeSearchInput(
             title=title,
             ingredients=ingredients,
+            excluded_ingredients=excluded_ingredients,
+            excluded_title_keywords=excluded_title_keywords,
             min_calories=min_calories, max_calories=max_calories,
             min_protein=min_protein,   max_protein=max_protein,
             min_fat=min_fat,           max_fat=max_fat,
@@ -201,7 +235,6 @@ class RecipeSearchTool(BaseTool):
         return [self._format_hit(h) for h in hits]
 
     async def _arun(self, **kwargs) -> List[dict]:
-        # For true async, swap in AsyncElasticsearch and await the search call
         return self._run(**kwargs)
 
 load_dotenv()

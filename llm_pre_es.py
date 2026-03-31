@@ -29,6 +29,8 @@ Rules:
 - "min_sodium": number if mentioned, else null
 - "max_sodium": number if mentioned, else null
 - "ingredients": list of ingredient strings the user has available, else null
+- "excluded_ingredients": list of ingredients the user explicitly does NOT want, else null
+- "excluded_title_keywords": list of words that should NOT appear in recipe title, else null
 - "max_results": always 3
 
 Return ONLY the JSON object. No explanation. No markdown. No extra text."""),
