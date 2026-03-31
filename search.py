@@ -2,6 +2,8 @@ from typing import List, Optional, Type
 from pydantic import BaseModel, Field, PrivateAttr
 from langchain.tools import BaseTool
 from elasticsearch import Elasticsearch
+import os
+from dotenv import load_dotenv
 
 
 class RecipeSearchInput(BaseModel):
@@ -137,6 +139,7 @@ class RecipeSearchTool(BaseTool):
         src = hit.get("_source", {})
         n = src.get("nutrition", {})
         return {
+            "id":          hit.get("_id"),
             "title":       src.get("title"),
             "servings":    src.get("servings"),
             "total_time":  src.get("total_time"),
@@ -201,8 +204,10 @@ class RecipeSearchTool(BaseTool):
         # For true async, swap in AsyncElasticsearch and await the search call
         return self._run(**kwargs)
 
+load_dotenv()
+
 es = Elasticsearch(
-    "http://localhost:9200",
+    os.getenv("ES_URL", "http://localhost:9200"),
     headers={"Content-Type": "application/json"},
 )
 search_recipes = RecipeSearchTool(es)
