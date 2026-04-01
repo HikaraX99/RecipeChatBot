@@ -1,11 +1,11 @@
 import json
+import uuid
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
-import uuid
 
-from llm_pre_es import run_agent_full, classify_intent, search, summarise
+from llm_pre_es import SearchSessionState
 from llm_handler import RecipeAssistant
 
 app = FastAPI(title="Recipe Chatbot API")
@@ -17,8 +17,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-assistants: dict[str, RecipeAssistant] = {}
-search_sessions: dict[str, dict] = {}
+# Keyed by session_id
+assistants:      dict[str, RecipeAssistant]    = {}
+search_sessions: dict[str, SearchSessionState] = {}
+
+
+# ---------------------------------------------------------------------------
+# Models  (shapes unchanged — frontend untouched)
+# ---------------------------------------------------------------------------
 
 class SearchRequest(BaseModel):
     query: str
@@ -35,115 +41,84 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     answer: str
 
-def pick_recipe(message: str, recipes: list) -> Optional[dict]:
-    msg = message.lower()
-    ordinals = {
-        "first": 0, "1st": 0, "one": 0, "1": 0,
-        "second": 1, "2nd": 1, "two": 1, "2": 1,
-        "third": 2, "3rd": 2, "three": 2, "3": 2,
-    }
-    for word, idx in ordinals.items():
-        if word in msg and idx < len(recipes):
-            return recipes[idx]
-    # Title keyword match
-    for recipe in recipes:
-        title_words = recipe.get("title", "").lower().split()
-        if any(w in msg for w in title_words if len(w) > 3):
-            return recipe
-    return recipes[0] if recipes else None
 
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
 
 @app.post("/search", response_model=SearchResponse)
 def search_recipes_endpoint(req: SearchRequest):
+    """
+    Step 1 — Initial recipe search.
+    Creates a SearchSessionState, runs the first search, stores the session.
+    Response shape is identical to before: { summary, session_id }.
+    """
     if not req.query.strip():
         raise HTTPException(status_code=400, detail="Query must not be empty.")
 
-    result = run_agent_full(req.query)
-
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-
+    session    = SearchSessionState()
+    result     = session.process_message(req.query)
     session_id = str(uuid.uuid4())
-    search_sessions[session_id] = result  # store for follow-up routing
 
-    return SearchResponse(summary=result["summary"], session_id=session_id)
+    if result["action"] == "error":
+        raise HTTPException(status_code=404, detail=result["message"])
+
+    search_sessions[session_id] = session
+    return SearchResponse(summary=result["message"], session_id=session_id)
 
 
 @app.post("/chat", response_model=ChatResponse)
 def chat_endpoint(req: ChatRequest):
     """
-    Handles all follow-up messages after /search.
+    Step 2 — All follow-up messages from the frontend.
 
-    If the session still has pending search state (user hasn't selected a recipe yet),
-    classify the user's intent:
-      - 'select' → pick a recipe, init the assistant, reply with confirmation
-      - 'more'   → search again with same params, return new summary
-      - 'change' → treat message as new search query, return new summary
+    Phase 2  (recipe already selected):
+      Route directly to RecipeAssistant — no change from original behaviour.
 
-    Once a recipe is selected (assistant exists), route directly to the assistant
-    as before — no change in behaviour.
+    Phase 1  (user still browsing):
+      Delegate entirely to SearchSessionState.process_message(), which mirrors
+      the __main__ CLI logic:
+        'search' / 'change' → new ES query, return summary
+        'more'              → extend previous search, return new summary
+        'select'            → pick recipe, init assistant, return confirmation
+        'error'             → return error message gracefully (no 500)
+
+    Fallback (direct API call with recipe_text):
+      Backwards-compatible with any client that bootstraps a session manually.
     """
 
+    # --- Phase 2: chat with the selected recipe ---
     if req.session_id in assistants:
-        assistant = assistants[req.session_id]
-        answer = assistant.ask(req.message, req.session_id)
+        answer = assistants[req.session_id].ask(req.message, req.session_id)
         return ChatResponse(answer=answer)
 
+    # --- Phase 1: user is still browsing ---
     if req.session_id in search_sessions:
         session = search_sessions[req.session_id]
-        intent = classify_intent(req.message)
+        result  = session.process_message(req.message)
 
-        if intent == "select":
-            recipe = pick_recipe(req.message, session["recipes"])
-            if not recipe:
-                return ChatResponse(answer="I couldn't tell which recipe you meant. "
-                                           "Try saying 'the first one' or the recipe name.")
-            # Init assistant with the selected recipe
-            recipe_text = json.dumps(recipe, indent=2, ensure_ascii=False)
+        if result["action"] == "select":
+            recipe_text = json.dumps(result["recipe"], indent=2, ensure_ascii=False)
             assistants[req.session_id] = RecipeAssistant(recipe_text)
-            # Clean up search state — not needed anymore
-            del search_sessions[req.session_id]
-            return ChatResponse(
-                answer=f"Great choice! You've selected **{recipe.get('title')}**. "
-                       "Ask me anything about it — ingredients, steps, substitutions, nutrition, etc."
-            )
+            del search_sessions[req.session_id]   # no longer needed
 
-        elif intent == "more":
-            params = {**session["params"], "max_results": 6}
-            all_recipes = search(params)
-            shown = {r.get("title") for r in session["recipes"]}
-            new_recipes = [r for r in all_recipes if r.get("title") not in shown][:3]
+        return ChatResponse(answer=result["message"])
 
-            if not new_recipes:
-                return ChatResponse(answer="Sorry, I couldn't find more recipes matching "
-                                           "your criteria. Try changing your requirements!")
-
-            new_summary = summarise(new_recipes)
-            search_sessions[req.session_id]["recipes"] = new_recipes
-            search_sessions[req.session_id]["summary"] = new_summary
-            return ChatResponse(answer=new_summary)
-
-        else:  # intent == "change"
-            result = run_agent_full(req.message)
-            if "error" in result:
-                return ChatResponse(answer=result["error"])
-            search_sessions[req.session_id] = result
-            return ChatResponse(answer=result["summary"])
-
+    # --- Fallback: no session found, try recipe_text bootstrap ---
     if not req.recipe_text:
         raise HTTPException(
             status_code=400,
-            detail="recipe_text is required for the first message in a session."
+            detail="No active session found. Start a new search via /search, "
+                   "or supply recipe_text to bootstrap a session directly.",
         )
     assistants[req.session_id] = RecipeAssistant(req.recipe_text)
-    assistant = assistants[req.session_id]
-    answer = assistant.ask(req.message, req.session_id)
+    answer = assistants[req.session_id].ask(req.message, req.session_id)
     return ChatResponse(answer=answer)
 
 
 @app.delete("/session/{session_id}")
 def clear_session(session_id: str):
-    """Optional — clear a session to free memory."""
+    """Optional — free memory for a session."""
     assistants.pop(session_id, None)
     search_sessions.pop(session_id, None)
     return {"deleted": session_id}
