@@ -8,9 +8,6 @@ from search import search_recipes
 
 llm = OllamaLLM(model="llama3.1", temperature=0)
 
-# ---------------------------------------------------------------------------
-# Prompts
-# ---------------------------------------------------------------------------
 
 EXTRACT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Extract recipe search parameters from the user message and return ONLY a JSON object.
@@ -55,23 +52,27 @@ INTENT_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """Classify the user's intent after they've seen recipe suggestions.
 Return ONLY one of these exact strings:
 
-- "add"    — user wants to ADD a new ingredient or constraint ON TOP of the current search
-             (e.g. "with chickpeas too", "also add garlic", "i want chickpeas as well",
-              "and make it spicy", "no chicken", "without beef", "i don't want X")
+- "add"    — DEFAULT. Use this for almost everything:
+             adding ingredients ("with chickpeas too", "also garlic"),
+             removing ingredients ("no chicken", "without beef", "i don't want X"),
+             adding constraints ("make it low calorie", "under 500 calories"),
+             asking a question about a specific recipe ("what are the ingredients of the first one?",
+               "how long does recipe 2 take?", "tell me more about the chicken one"),
+             any vague follow-up that builds on current results.
 
-- "more"   — user wants MORE recipes with the SAME criteria, no new constraints
-             (e.g. "show me more", "any other options?", "different ones", "give me more")
+- "more"   — user wants MORE recipes with the EXACT SAME criteria, no changes at all
+             (e.g. "show me more", "any other options?", "different ones", "give me more").
 
-- "select" — user is PICKING one of the shown recipes
-             (e.g. "i'll take the first one", "option 2", "the chicken one",
-              "tell me more about the second", "i want that one")
+- "select" — user is ONLY picking a recipe with NO question attached
+             (e.g. "i'll take the first one", "i choose option 2", "i want that one").
+             Do NOT use this if the message contains a question.
 
-- "change" — user wants to START OVER with COMPLETELY NEW criteria, replacing everything
-             (e.g. "actually find me pasta", "forget it, show me salads",
-              "i want something totally different", "search for pizza instead")
+- "change" — user explicitly wants to START COMPLETELY OVER, discarding all history
+             (e.g. "forget it", "start over", "search for something completely different",
+              "never mind, show me pizza instead").
 
-When in doubt between "add" and "change": if the message mentions keeping or extending
-current results, use "add". If it sounds like a fresh start, use "change".
+IMPORTANT: When in doubt, use "add". Only use "change" if the user clearly wants to
+discard everything. Only use "select" if the message is a pure selection with no question.
 
 Return ONLY the single word. No punctuation. No explanation."""),
     ("human", "User message: {message}"),
@@ -80,10 +81,6 @@ Return ONLY the single word. No punctuation. No explanation."""),
 extract_chain = EXTRACT_PROMPT | llm
 summary_chain = SUMMARY_PROMPT | llm
 intent_chain  = INTENT_PROMPT  | llm
-
-# ---------------------------------------------------------------------------
-# Core helpers
-# ---------------------------------------------------------------------------
 
 def parse_params(user_input: str) -> dict:
     raw = extract_chain.invoke({"user_input": user_input})
@@ -97,37 +94,30 @@ def parse_params(user_input: str) -> dict:
 def merge_params(base: dict, update: dict) -> dict:
     """
     Merge new extracted params ON TOP of existing params so constraints accumulate.
-
-    - "title": APPEND new title keywords to existing ones (space-separated)
-               so "chicken" + "chickpeas" -> "chicken chickpeas" in the ES query.
-    - List fields (ingredients, excluded_ingredients, excluded_title_keywords):
-               union — no duplicates.
-    - Numeric scalars: update wins only if not null (keeps existing otherwise).
-    - max_results: always 3.
+    - "title"      : append new keywords (space-separated), no duplicates
+    - List fields  : union, no duplicates
+    - Numeric scalars: update wins only if not null
+    - max_results  : always 3
     """
     merged = base.copy()
-
     LIST_FIELDS = {"ingredients", "excluded_ingredients", "excluded_title_keywords"}
 
     for key, new_val in update.items():
         if new_val is None:
-            continue  # keep existing value when update has nothing new
+            continue
 
         if key == "title":
-            existing_title = merged.get("title") or ""
+            existing = merged.get("title") or ""
             new_title = str(new_val).strip()
-            # Append only if the new keyword isn't already in the existing title
-            if new_title and new_title.lower() not in existing_title.lower():
-                merged["title"] = f"{existing_title} {new_title}".strip() if existing_title else new_title
-            # If new_title is already covered, leave existing unchanged
+            if new_title and new_title.lower() not in existing.lower():
+                merged["title"] = f"{existing} {new_title}".strip() if existing else new_title
 
         elif key in LIST_FIELDS:
             existing = merged.get(key) or []
-            combined = existing + [v for v in new_val if v not in existing]
-            merged[key] = combined if combined else None
+            merged[key] = existing + [v for v in new_val if v not in existing] or None
 
         else:
-            merged[key] = new_val  # numeric scalar: update wins
+            merged[key] = new_val
 
     merged["max_results"] = 3
     return merged
@@ -161,17 +151,14 @@ def summarise(recipes: List[dict]) -> str:
 
 def classify_intent(message: str) -> str:
     raw = intent_chain.invoke({"message": message}).strip().lower()
-    for intent in ("add", "select", "more", "change"):
+    for intent in ("select", "more", "change", "add"):
         if intent in raw:
             return intent
-    return "change"  # safe default
+    return "add"  # "add" is the safe default
 
 
 def pick_recipe(message: str, all_recipes: list, latest_recipes: list) -> Optional[dict]:
-    """
-    1. Title-keyword match across ALL ever-shown recipes.
-    2. Ordinal match within the latest batch.
-    """
+    """Title-keyword match across all shown, then ordinal match in latest batch."""
     msg = message.lower()
 
     for recipe in all_recipes:
@@ -196,11 +183,9 @@ def run_agent_full(user_input: str) -> dict:
         params = parse_params(user_input)
     except (json.JSONDecodeError, ValueError) as e:
         return {"error": f"Sorry, I couldn't understand that request. ({e})"}
-
     recipes = search(params)
     if not recipes:
         return {"error": "I couldn't find any recipes matching that in the database."}
-
     return {"params": params, "recipes": recipes, "summary": summarise(recipes)}
 
 
@@ -209,19 +194,16 @@ def run_agent(user_input: str) -> str:
     return result.get("error") or result.get("summary", "")
 
 
-# ---------------------------------------------------------------------------
-# SearchSessionState
-# ---------------------------------------------------------------------------
-
 class SearchSessionState:
     """
     Per-session browsing state.
 
     Intent routing:
-      "add"    -> merge new params onto last_params, re-search
+      "add"    -> merge new params onto last_params, re-search  (DEFAULT)
       "more"   -> same params, bigger fetch, exclude seen titles
-      "select" -> pick recipe from history
-      "change" -> clear all state, start fresh search
+      "select" -> pick recipe; return it along with the original message
+                  so app.py can immediately answer any embedded question
+      "change" -> clear all state, fresh search
     """
 
     def __init__(self):
@@ -232,76 +214,60 @@ class SearchSessionState:
     def process_message(self, message: str) -> dict:
         """
         Returns:
-          { "action": "search"|"add"|"more"|"select"|"change"|"error",
-            "message": <str for frontend>,
-            "recipe":  <dict>  # only when action == "select" }
+          {
+            "action":        "search"|"add"|"more"|"select"|"change"|"error",
+            "message":       <text for chat bubble>,
+            "recipe":        <full recipe dict>    # only when action == "select"
+            "user_question": <original message>    # only when action == "select"
+          }
         """
-        # First message always goes straight to search
         if not self.latest_recipes:
             return self._do_search(message)
 
         try:
             intent = classify_intent(message)
         except Exception:
-            intent = "change"
+            intent = "add"
 
         if intent == "select":
             return self._do_select(message)
         elif intent == "more":
             return self._do_more()
-        elif intent == "add":
-            return self._do_add(message)
-        else:  # "change"
+        elif intent == "change":
             return self._do_change(message)
-
-    # ------------------------------------------------------------------
-    # Intent handlers
-    # ------------------------------------------------------------------
+        else:  # "add" — the default
+            return self._do_add(message)
 
     def _do_search(self, user_input: str) -> dict:
-        """Initial search — parses params and runs ES query."""
         try:
             params = parse_params(user_input)
         except (json.JSONDecodeError, ValueError) as e:
-            return {"action": "error",
-                    "message": f"Sorry, I couldn't understand that request. ({e})"}
+            return {"action": "error", "message": f"Sorry, I couldn't understand that. ({e})"}
 
         recipes = search(params)
         if not recipes:
-            return {"action": "error",
-                    "message": "I couldn't find any recipes matching that. Try a different search!"}
+            return {"action": "error", "message": "I couldn't find any recipes matching that. Try a different search!"}
 
         self.last_params    = params
         self.latest_recipes = recipes
         self.all_shown_recipes.extend(recipes)
-
         return {"action": "search", "message": summarise(recipes)}
 
     def _do_add(self, user_input: str) -> dict:
-        """
-        ADD intent: extract params from the new message, MERGE with last_params,
-        re-search. Title keywords are appended, list fields are unioned.
-        e.g. last_params had title="chicken"; user says "with chickpeas as well"
-             -> new params title="chickpeas", ingredients=["chickpeas"]
-             -> merged title="chicken chickpeas", ingredients=["chickpeas"]
-        """
+        """Extract params from new message, merge with existing, re-search."""
         try:
             new_params = parse_params(user_input)
         except (json.JSONDecodeError, ValueError) as e:
-            return {"action": "error",
-                    "message": f"Sorry, I couldn't understand that. ({e})"}
+            return {"action": "error", "message": f"Sorry, I couldn't understand that. ({e})"}
 
-        merged = merge_params(self.last_params, new_params)
+        merged  = merge_params(self.last_params, new_params)
         recipes = search(merged)
 
         if not recipes:
-            return {"action": "error",
-                    "message": "I couldn't find recipes matching those combined criteria. "
-                               "Try relaxing some constraints!"}
+            return {"action": "error", "message": "I couldn't find recipes matching those combined criteria. Try relaxing some constraints!"}
 
         self.last_params    = merged
         self.latest_recipes = recipes
-
         existing_titles = {r.get("title") for r in self.all_shown_recipes}
         for r in recipes:
             if r.get("title") not in existing_titles:
@@ -310,54 +276,42 @@ class SearchSessionState:
         return {"action": "add", "message": summarise(recipes)}
 
     def _do_more(self) -> dict:
-        """MORE intent: same params, bigger fetch, exclude already-seen titles."""
         if not self.last_params:
-            return {"action": "error",
-                    "message": "I don't have a previous search to extend. What are you looking for?"}
+            return {"action": "error", "message": "I don't have a previous search to extend. What are you looking for?"}
 
         more_results = search({**self.last_params, "max_results": 15})
         shown_titles = {r.get("title") for r in self.all_shown_recipes}
         new_recipes  = [r for r in more_results if r.get("title") not in shown_titles][:3]
 
         if not new_recipes:
-            return {"action": "error",
-                    "message": "Sorry, no more recipes matching your criteria. Try changing your search!"}
+            return {"action": "error", "message": "Sorry, no more recipes matching your criteria. Try changing your search!"}
 
         self.latest_recipes = new_recipes
         for r in new_recipes:
             self.all_shown_recipes.append(r)
-
         return {"action": "more", "message": summarise(new_recipes)}
 
     def _do_change(self, user_input: str) -> dict:
-        """CHANGE intent: wipe all state and start a completely fresh search."""
         self.all_shown_recipes = []
         self.latest_recipes    = []
         self.last_params       = {}
         return self._do_search(user_input)
 
     def _do_select(self, message: str) -> dict:
-        """SELECT intent: match message to a recipe; ask to clarify if ambiguous."""
         selected = pick_recipe(message, self.all_shown_recipes, self.latest_recipes)
-
         if not selected:
             return {
                 "action":  "error",
                 "message": "I couldn't tell which recipe you meant. "
                            "Try 'the first one', 'the second one', or say the recipe name.",
             }
-
         return {
-            "action":  "select",
-            "message": f"Great choice! You've selected **{selected.get('title')}**. "
-                       "Ask me anything about it — ingredients, steps, substitutions, nutrition, etc.",
-            "recipe":  selected,
+            "action":        "select",
+            "message":       f"You've selected **{selected.get('title')}**.",
+            "recipe":        selected,
+            "user_question": message,  
         }
 
-
-# ---------------------------------------------------------------------------
-# CLI entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     from llm_handler import RecipeAssistant
@@ -378,16 +332,17 @@ if __name__ == "__main__":
                 continue
 
             if active_assistant:
-                answer = active_assistant.ask(user_input, cli_session_id)
-                print(f"\nASSISTANT: {answer}\n")
+                print(f"\nASSISTANT: {active_assistant.ask(user_input, cli_session_id)}\n")
                 continue
 
             result = session.process_message(user_input)
-            print(f"\nASSISTANT: {result['message']}\n")
 
             if result["action"] == "select":
                 recipe_text      = json.dumps(result["recipe"], indent=2, ensure_ascii=False)
                 active_assistant = RecipeAssistant(recipe_text)
+                print(f"\nASSISTANT: {active_assistant.ask(result['user_question'], cli_session_id)}\n")
+            else:
+                print(f"\nASSISTANT: {result['message']}\n")
 
         except KeyboardInterrupt:
             print("\nExiting agent...")
