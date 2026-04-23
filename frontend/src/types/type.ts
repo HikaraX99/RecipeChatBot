@@ -30,4 +30,5 @@ export type SearchResponse = {
 export type ChatResponse = {
   answer: string;
   recipe_cards: RecipeCard[];
+  recipe_text?: string | null;
 };

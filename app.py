@@ -41,7 +41,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer:       str
-    recipe_cards: List[RecipeCard] = []  
+    recipe_cards: List[RecipeCard] = []
+    recipe_text:  Optional[str] = None
 
 
 def to_card(recipe: dict) -> RecipeCard:
@@ -89,7 +90,7 @@ def chat_endpoint(req: ChatRequest):
             del search_sessions[req.session_id]
 
             answer = assistant.ask(result["user_question"], req.session_id)
-            return ChatResponse(answer=answer)
+            return ChatResponse(answer=answer, recipe_text=recipe_text)
 
         cards = []
         if result["action"] in ("search", "add", "more", "change"):

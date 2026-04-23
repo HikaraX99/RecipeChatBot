@@ -157,14 +157,51 @@ def classify_intent(message: str) -> str:
     return "add"  # "add" is the safe default
 
 
-def pick_recipe(message: str, all_recipes: list, latest_recipes: list) -> Optional[dict]:
-    """Title-keyword match across all shown, then ordinal match in latest batch."""
-    msg = message.lower()
+STOPWORDS = {
+    "the", "and", "with", "from", "that", "this", "those", "these",
+    "recipe", "option", "dish", "one", "please", "make", "cook",
+    "show", "tell", "about", "would", "like", "want", "take", "pick",
+    "choose", "how", "what", "when", "where", "which", "can", "could",
+    "should", "will", "into", "your", "have",
+}
 
-    for recipe in all_recipes:
-        title_words = [w for w in recipe.get("title", "").lower().split() if len(w) > 3]
-        if title_words and any(w in msg for w in title_words):
-            return recipe
+
+def normalize_text(value: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", value.lower())).strip()
+
+
+def significant_words(value: str) -> list[str]:
+    return [
+        word for word in normalize_text(value).split()
+        if len(word) > 2 and word not in STOPWORDS
+    ]
+
+
+def recipe_match_score(message: str, recipe: dict) -> int:
+    msg_words = set(significant_words(message))
+    title_words = significant_words(recipe.get("title", ""))
+    if not msg_words or not title_words:
+        return 0
+    return sum(1 for word in title_words if word in msg_words)
+
+
+def looks_like_recipe_selection(message: str) -> bool:
+    msg = normalize_text(message)
+    selection_markers = (
+        "first", "second", "third", "1st", "2nd", "3rd",
+        "pick", "picked", "choose", "chose", "select", "selected",
+        "take", "want that", "i want", "i will", "ill", "i'll",
+    )
+    question_markers = (
+        "how", "what", "ingredients", "steps", "make it", "cook it",
+        "tell me more", "how long", "can i", "?",
+    )
+    return any(marker in msg for marker in selection_markers + question_markers)
+
+
+def pick_recipe(message: str, all_recipes: list, latest_recipes: list) -> Optional[dict]:
+    """Prefer ordinal/latest-batch matches, then strongest title match."""
+    msg = message.lower()
 
     ordinals = {
         "first": 0, "1st": 0, "1": 0,
@@ -174,6 +211,19 @@ def pick_recipe(message: str, all_recipes: list, latest_recipes: list) -> Option
     for word, idx in ordinals.items():
         if word in msg and idx < len(latest_recipes):
             return latest_recipes[idx]
+
+    candidates = latest_recipes + [
+        recipe for recipe in all_recipes
+        if recipe not in latest_recipes
+    ]
+    scored = [
+        (recipe_match_score(message, recipe), recipe)
+        for recipe in candidates
+    ]
+    scored.sort(key=lambda item: item[0], reverse=True)
+
+    if scored and scored[0][0] >= 2:
+        return scored[0][1]
 
     return None
 
@@ -223,6 +273,11 @@ class SearchSessionState:
         """
         if not self.latest_recipes:
             return self._do_search(message)
+
+        if looks_like_recipe_selection(message):
+            selected = pick_recipe(message, self.all_shown_recipes, self.latest_recipes)
+            if selected:
+                return self._do_select(message)
 
         try:
             intent = classify_intent(message)

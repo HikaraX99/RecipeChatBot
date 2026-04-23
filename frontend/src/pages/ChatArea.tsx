@@ -112,7 +112,7 @@ const ChatArea = () => {
             replyText = searchRes.summary;
             replyCards = searchRes.recipe_cards ?? [];
             setSessionId(searchRes.session_id);
-            setRecipeText(searchRes.summary);
+            setRecipeText("");
           } else {
             replyText = "ERROR: Please check your payload.";
           }
@@ -131,6 +131,7 @@ const ChatArea = () => {
             chatRes = await chatBotRes.json();
             replyText = chatRes.answer;
             replyCards = chatRes.recipe_cards ?? [];
+            setRecipeText(chatRes.recipe_text ?? "");
           } else {
             replyText = `ERROR: Please check your session ID and payload.`;
           }
