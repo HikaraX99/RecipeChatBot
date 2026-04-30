@@ -1,4 +1,4 @@
-# RecipeChatbot
+# RecipeChatbot 
 
 RecipeChatbot is a capstone project that helps users find recipes through a chat interface. The app combines a React frontend, a FastAPI backend, Elasticsearch recipe search, and a local Ollama LLM workflow. Users can search by ingredients, dish names, nutrition goals, or exclusions, then select a recipe and ask follow-up questions about it.
 
@@ -134,16 +134,28 @@ http://localhost:5173
 
 The frontend sends requests to `/api/*`. Vite proxies those requests to the FastAPI backend at `http://localhost:8000`.
 
+## UI Design
+
+### Home Page:
+
+<img width="1454" height="668" alt="image" src="https://github.com/user-attachments/assets/1ee0ece7-be5f-43d5-a34f-09a2e912cb29" />
+
+### Chat Page:
+
+<img width="1491" height="853" alt="image" src="https://github.com/user-attachments/assets/e7f3bf1a-0991-4d3c-aa5f-092fe1ae61c5" />
+
+
+
 ## How to Use
 
 1. Open the frontend in your browser.
-2. Enter a recipe request, for example:
+2. Enter a recipe request at the home page, for example:
 
 ```text
 I want a low calorie chicken dinner with garlic
 ```
 
-3. Review the suggested recipes.
+3. After the user submits a prompt, the website navigates to the chat page and displays three suggested recipes.
 4. Pick one by saying something like:
 
 ```text
@@ -166,6 +178,11 @@ no mushrooms
 show me more
 start over and search for pasta
 ```
+
+To clear the recipe history, click the refresh button under the chatbot responses or refresh the whole page.
+
+<img width="260" height="156" alt="image" src="https://github.com/user-attachments/assets/b94d2483-45d4-4514-a947-d86fd37c58db" />
+
 
 ## API Endpoints
 
@@ -262,13 +279,6 @@ Create a `.env` file in the project root if your Elasticsearch URL is different:
 ES_URL=http://localhost:9200
 ```
 
-## Development Checks
-
-Backend syntax check:
-
-```bash
-python -m py_compile app.py search.py llm_handler.py llm_pre_es.py data_load_elastic.py scrape_recipes.py
-```
 
 ## Troubleshooting
 
